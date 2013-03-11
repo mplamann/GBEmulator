@@ -1,20 +1,27 @@
+(load "memory.lisp")
+
+;; CPU definition
 (defclass cpu ()
-  ((a :initform 0 :accessor a)
-   (b :initform 0 :accessor b)
-   (c :initform 0 :accessor c)
-   (d :initform 0 :accessor d)
-   (e :initform 0 :accessor e)
-   (f :initform 0 :accessor f)
-   (h :initform 0 :accessor h)
-   (l :initform 0 :accessor l)
-   (pc :initform 0 :accessor pc)
+  ((a  :initform 0      :accessor a)
+   (b  :initform 0      :accessor b)
+   (c  :initform #x13   :accessor c)
+   (d  :initform 0      :accessor d)
+   (e  :initform #xD8   :accessor e)
+   (f  :initform #xB0   :accessor f)
+   (h  :initform 1      :accessor h)
+   (l  :initform #x4D   :accessor l)
+   (pc :initform 0      :accessor pc)
    (sp :initform #xFFFE :accessor sp)))
+
+;; Processor register/flags access
 (defmacro with-cpu (cpu &body body)
   `(with-accessors ((a a) (b b)
 		    (c c) (d d)
 		    (e e) (h h)
 		    (l l) (sp sp)
-		    (pc pc) (f f))
+		    (pc pc) (f f)
+		    (hl hl) (af af)
+		    (bc bc) (de de))
 		   ,cpu
      ,@body))
 (defun set-flags (cpu z n h-flag c-flag)
@@ -25,8 +32,55 @@
 	    (ash (if n 1 0) 6)
 	    (ash (if h-flag 1 0) 5)
 	    (ash (if c-flag 1 0) 4)))))
+
+(defun is-bit-set (bit value)
+  (/= 0 (ldb (byte 1 bit) value)))
+(defun c-flag (cpu)
+  (is-bit-set 4 (f cpu)))
+(defun z-flag (cpu)
+  (is-bit-set 7 (f cpu)))
+(defun n-flag (cpu)
+  (is-bit-set 6 (f cpu)))
+(defun h-flag (cpu)
+  (is-bit-set 5 (f cpu)))
+
+;; 16-bit register access
+(defgeneric af (cpu))
+(defgeneric set-af (cpu value))
+(defmethod af ((cpu cpu)) (make-16-bit-value (a cpu) (f cpu)))
+(defmethod set-af ((cpu cpu) value)
+  (with-cpu cpu
+	    (multiple-value-setq (a f) (decompose-16-bit-value value))))
+(defsetf af set-af)
+
+(defgeneric bc (cpu))
+(defgeneric set-bc (cpu value))
+(defmethod bc ((cpu cpu)) (make-16-bit-value (b cpu) (c cpu)))
+(defmethod set-bc ((cpu cpu) value)
+  (with-cpu cpu
+	    (multiple-value-setq (b c) (decompose-16-bit-value value))))
+(defsetf bc set-bc)
+
+(defgeneric de (cpu))
+(defgeneric set-de (cpu value))
+(defmethod de ((cpu cpu)) (make-16-bit-value (d cpu) (e cpu)))
+(defmethod set-hl ((cpu cpu) value)
+  (with-cpu cpu
+	    (multiple-value-setq (d e) (decompose-16-bit-value value))))
+(defsetf de set-de)
+
+(defgeneric hl (cpu))
+(defgeneric set-hl (cpu value))
+(defmethod hl ((cpu cpu)) (make-16-bit-value (h cpu) (l cpu)))
+(defmethod set-hl ((cpu cpu) value)
+  (with-cpu cpu
+	    (multiple-value-setq (h l) (decompose-16-bit-value value))))
+(defsetf hl set-hl)
+
 (defun nullp (value)
   (eq value '()))
+
+;; Opcode maps
 
 (defparameter *opcode-bases*
   #(nop ld ld inc-16 inc dec ld rlc ld add-16 ld dec-16 inc dec ld rrc  ; 0
@@ -43,8 +97,8 @@
                                     xor xor xor xor xor xor xor xor     ; A
     gb-or  gb-or  gb-or  gb-or  gb-or  gb-or  gb-or  gb-or
                                     cp  cp  cp  cp  cp  cp  cp  cp      ; B
-    ret pop jp jp call push add rst ret ret jp extern call call adc rst ; C
-    ret pop jp xx call push sub rst ret ret jp xx call xx sbc rst       ; D
+    ret pop jp-nz jp call push add rst ret ret jp-z extern call call adc rst ; C
+    ret pop jp-nc xx call push sub rst ret ret jp-c xx call xx sbc rst       ; D
     ldh pop ldh xx xx push and rst add-16 jp ld xx xx xx xor rst        ; E
     ldh pop xx di xx push or rst ldhl ld ld ei xx xx cp ret             ; F
     ))
@@ -111,14 +165,14 @@
     (b) (c) (d) (e)
     (h) (l) (hl) (a)
     ; 0xC_
-    (nz) (bc) (nz nn) (nn)
+    (nz) (bc) (nn) (nn)
     (nz nn) (bc) (a n) (0)
-    (z) () (z nn) ()
+    (z) () (nn) ()
     (z nn) (nn) (a n) (8)
     ; 0xD_
-    (nc) (de) (nc nn) ()
+    (nc) (de) (nn) ()
     (nc nn) (de) (a n) (10)
-    (c) () (c nn) ()
+    (c) () (nn) ()
     (c nn) () (a n) (18)
     ; 0xE_
     (n a) (hl) (c a) ()
@@ -128,7 +182,7 @@
     ; 0xF_
     (a n) (af) (xx) ()
     () (af) (n) (30)
-    (sp d) (sp hl) (a nn) ()
+    (n) (sp hl) (a nn) ()
     () () (n) (38)))
 
 (defun make-16-bit-value (upper lower)
@@ -150,12 +204,15 @@
 	 (e (setq e value))
 	 (h (setq h value))
 	 (l (setq l value))
-	 (hf (multiple-value-setq (h f) (decompose-16-bit-value value)))
+	 (af (multiple-value-setq (a f) (decompose-16-bit-value value)))
 	 (bc (multiple-value-setq (b c) (decompose-16-bit-value value)))
 	 (de (multiple-value-setq (d e) (decompose-16-bit-value value)))
 	 (hl (multiple-value-setq (h l) (decompose-16-bit-value value)))
 	 (sp (setq sp value))
-	 (pc (setq pc value))))))
+	 (pc (setq pc value))
+	 (nn (let ((addr (make-16-bit-value (mem-read (+ pc 1)) (mem-read (+ pc 2)))))
+	       (multiple-value-bind (bit1 bit2) (decompose-16-bit-value value)
+		 (mem-write addr bit1) (mem-write (+ addr 1) bit2))))))))
 (defun read-from-mapping (cpu mapping)
   (with-cpu cpu
     (if (nullp mapping)
@@ -163,20 +220,30 @@
       (let ((source (if (nullp (cadr mapping))
 			(car mapping)
 		      (cadr mapping))))
-	(case source
-	  (a a)
-	  (b b)
-	  (c c)
-	  (d d)
-	  (e e)
-	  (h h)
-	  (l l)
-	  (hf (make-16-bit-value h f))
-	  (bc (make-16-bit-value b c))
-	  (de (make-16-bit-value d e))
-	  (hl (make-16-bit-value h l))
-	  (sp sp)
-	  (pc pc))))))
+	(if (symbolp source)
+	  (case source
+	    (a a)
+	    (b b)
+	    (c c)
+	    (d d)
+	    (e e)
+	    (h h)
+	    (l l)
+	    (af (make-16-bit-value a f))
+	    (bc (make-16-bit-value b c))
+	    (de (make-16-bit-value d e))
+	    (hl (make-16-bit-value h l))
+	    (sp sp)
+	    (pc pc)
+	    (n (mem-read (mem-read (+ pc 1))))
+	    (nn (mem-read (make-16-bit-value (mem-read (+ pc 1)) (mem-read (+ pc 2))))))
+	  source)))))
+(defun bytes-for-mapping (mapping)
+  (+ 1
+     (loop for reg in mapping summing (case reg
+					(n 1)
+					(nn 2)
+					(t 0)))))
 
 (defun run-instruction (cpu opcode)
   (multiple-value-bind (opcode-symbol mapping) (decode-instruction opcode)
@@ -195,6 +262,16 @@
    (lambda (value) (write-to-mapping cpu mapping value))))
 
 (defmacro defopcode (name &body body)
+  `(defun ,name (cpu arg write-function mapping)
+     (declare (ignorable cpu))
+     (declare (ignorable arg))
+     (declare (ignorable write-function))
+     (declare (ignorable mapping))
+     (with-cpu cpu
+	       ,@body
+	       (incf pc (bytes-for-mapping mapping)))))
+;; defjump does not change PC, so that it does not interfere with a jump
+(defmacro defjump (name &body body)
   `(defun ,name (cpu arg write-function)
      (declare (ignorable cpu))
      (declare (ignorable arg))
@@ -214,8 +291,12 @@
 	 nil
        t)))
 
+;; Opcodes
+
 (defopcode ld
   (funcall write-function arg))
+(defopcode ldhl
+  (setf hl (+ sp arg)))
 
 (defopcode add
   (let ((newA (+ a arg)))
@@ -288,7 +369,45 @@
 	       (= (logand #xFF new-val) 0)
 	       t
 	       (not (check-borrow 4 arg 1 new-val))
-	       (/= 0 (logand #x10 f)))
+	       (c-flag cpu))
     (funcall write-function new-val)))
 (defopcode dec-16
   (funcall write-function (- arg 1)))
+
+;; Jumps
+(defjump jp
+  (setf pc arg))
+(defjump jp-nz
+  (if (z-flag cpu)
+      nil
+    (setf pc arg)))
+(defjump jp-z
+  (if (z-flag cpu)
+      (setf pc arg)
+    nil))
+(defjump jp-nc
+  (if (c-flag cpu)
+      nil
+    (setf pc arg)))
+(defjump jp-c
+  (if (c-flag cpu)
+      (setf pc arg)
+    nil))
+(defjump jr
+  (incf pc))
+
+;; Bit opcodes
+(defopcode gb-bit
+  (set-flags cpu
+	     (not (is-bit-set arg (funcall (symbol-function (cadr mapping)))))
+	     nil
+	     t
+	     (c-flag cpu)))
+
+;; Misc.
+
+(defopcode nop
+  nil)
+(defopcode xx
+  (format t "Illegal opcode!~%"))
+
